@@ -28,7 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+import pytz
+import win32timezone
 
 try:
     import win32file
@@ -267,6 +269,8 @@ def update_creation_date(file_path, new_date :int):
     #timestamp = new_date.timestamp()
     filetime = pywintypes.Time(new_date)
 
+    #filetime = datetime.fromtimestamp(new_date, tz=win32timezone.TimeZoneInfo('GMT Standard Time', True))
+
     # Open the file handle
     handle = win32file.CreateFile(
         file_path,
@@ -282,7 +286,7 @@ def update_creation_date(file_path, new_date :int):
         creation_time, access_time, write_time = win32file.GetFileTime(handle)
 
         # Update only the creation time, keep others unchanged
-        win32file.SetFileTime(handle, filetime, access_time, write_time)
+        win32file.SetFileTime(handle, filetime, access_time, write_time,False)
         print(f"Successfully updated creation date of '{file_path}' to {new_date}")
     finally:
         win32file.CloseHandle(handle)
@@ -302,22 +306,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--case-insensitive", action="store_true", help="Allow case-insensitive filename matching if exact match is missing.")
     return parser.parse_args(argv)
 
-def dry_run():
-    # Example: Update creation date of a file
-    file_to_update = "F:\\Project_output\\Output\\GooglePhotosTakeout_extracted_2\\Takeout\\Google Photos\\Photos from 2019\\20190921_124620_HDR.jpg"
-
-    # Set new creation date (e.g., January 1, 2020, 12:00 PM)
-    new_creation_date = datetime(2020, 1, 1, 12, 0, 0)
-    try:
-        update_creation_date(file_to_update, new_creation_date)
-    except Exception as e:
-        print(f"Error: {e}")
-    return 0
 
 def main(argv: Optional[List[str]] = None) -> int:
-
-#   dry_run()
-#   return 0
 
     args = parse_args(argv)
     configure_logging(args.verbose)
