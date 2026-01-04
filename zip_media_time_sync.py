@@ -21,24 +21,30 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import os
-from datetime import datetime, timezone
-import pytz
-import win32timezone
+from datetime import datetime
+
+import piexif
+from PIL import Image
+from PIL.ExifTags import TAGS
 
 try:
     import win32file
     import win32con
     import pywintypes
     WINDOWS_AVAILABLE = True
-except ImportError:
+
+except ImportError as e:
     WINDOWS_AVAILABLE = False
+    print(f"An ImportError occurred: {e}")
+    print(f"Name of the missing module/item: {e.name}")
+    # Note: path might be None if the issue isn't file-related.
+#   print(f"Path checked: {e.path}")
     print("Warning: pywin32 not installed. Install it with: python -m pip install pywin32")
 
 
@@ -47,6 +53,11 @@ except ImportError:
 
 
 def configure_logging(verbosity: int) -> None:
+    """
+    Handling the logging within the process
+    :param verbosity:
+    :return:
+    """
     level = logging.WARNING
     if verbosity >= 2:
         level = logging.DEBUG
@@ -63,6 +74,9 @@ def configure_logging(verbosity: int) -> None:
 
 @dataclass
 class UpdateResult:
+    """
+    The Json data content that is relevant for
+    """
     media_path: Path
     json_path: Path
     timestamp: int
@@ -74,6 +88,20 @@ class UpdateResult:
 
 
 def ensure_new_extraction_dir(zip_path: Path, output_dir: Optional[Path]) -> Path:
+    """
+    The method creates a new directory at the output directory as it was
+    sent as a parameter to the command line and create a new folder:
+
+    {Zip file name (without the extension)_extracted_2}_extracted{_number that doesnt exist}
+    Ex: If the output_dir is: F:\\Project_output\\Output
+    and the zip file is: GooglePhotosTakeout.zip
+    It will create the folder: F:\\Project_output\\Output\\GooglePhotosTakeout_extracted
+    and if it exists it will create: F:\\Project_output\\Output\\GooglePhotosTakeout_extracted_1 ...
+
+    :param zip_path:
+    :param output_dir:
+    :return:
+    """
     zip_stem = zip_path.stem
     parent = output_dir if output_dir else zip_path.parent
     # Ensure a deterministic new folder name. Avoid clobbering existing contents.
@@ -97,6 +125,12 @@ def _is_within_directory(directory: Path, target: Path) -> bool:
 
 
 def safe_extract_zip(zip_path: Path, destination: Path) -> None:
+    """
+    This method extracts the zip file and also creates the relevant folders and sub folders
+    :param zip_path:
+    :param destination:
+    :return:
+    """
     import zipfile
 
     logging.info("Extracting ZIP to %s", destination)
@@ -131,14 +165,21 @@ def iter_metadata_json_files(root: Path) -> Iterable[Path]:
 
 
 def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
-    # Accept patterns like:
-    #   name.ext.json
-    #   name.ext.metadata.json
-    #   name.ext.supplemental-metadata.json
+    """
+     Accept patterns like:
+    <name>.<ext>.json
+    <name>.<ext>.metadata.json
+    <name>.<ext>.supplemental-metadata.json
+    <name>.<ext>.suppl.json
+    <name>.<ext>.s.json
+    :param json_filename:
+    :return:
+    """
+
     if not json_filename.endswith('.json'):
         return None
     base = json_filename[:-5]  # strip .json
-    for suffix in ('.supplemental-metadata', '.metadata'):
+    for suffix in ('.supplemental-metadata', '.metadata', '.suppl', '.s' ):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
@@ -150,9 +191,17 @@ def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
 
 
 def find_matching_media(json_path: Path, case_insensitive: bool) -> Optional[Path]:
+    """
+
+    :param json_path:
+    :param case_insensitive:
+    :return:
+    """
     candidate_name = candidate_media_name_from_json(json_path.name)
     if not candidate_name:
         return None
+    # the with_name() method is used to return a new path object where the final component
+    # (the filename or directory name) is replaced by a new name.
     direct_candidate = json_path.with_name(candidate_name)
     if direct_candidate.exists():
         return direct_candidate
@@ -172,6 +221,12 @@ def find_matching_media(json_path: Path, case_insensitive: bool) -> Optional[Pat
 
 
 def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] | None:
+    """
+    Parse the timestamp from a JSON file. This method returns the photo_taken_time and creation_time
+    :param json_path:
+    :return: photo_taken_time, creation_time
+    :rtype int, int
+    """
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -211,17 +266,44 @@ def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] 
     return None
 
 
-def apply_timestamp_to_file(file_path: Path, timestamp: int, dry_run: bool) -> Tuple[bool, str]:
+def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_time: int, dry_run: bool) -> Tuple[bool, str]:
+    """
+    This method updates the timestamp of the file.
+    It set the Access Time (atime) and Modification Time (mtime) of the jpeg files.
+    For movies (*.mov) it will update the "Media Created."
+    :param media_path:
+    :param photo_taken_time:
+    :param creation_time:
+    :param dry_run:
+    :return:
+    """
+
+    #get_exif_data_of_file(file_path,timestamp)
+
     try:
         if dry_run:
             return False, "dry-run"
-        os.utime(file_path, (timestamp, timestamp))
+        #Update access time and modification time
+
+
+        #Update the date taken time
+        update_date_taken(media_path, photo_taken_time)
+        # Update the creation Date of the jpg file
+        update_creation_date(str(media_path), creation_time)
         return True, ""
     except Exception as exc:
         return False, str(exc)
 
 
 def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> List[UpdateResult]:
+    """
+    This method finds all the json files, then finds all the relevant file files that relates
+    to the json file inorder to change its 'Photo Taken Time' and 'Creation Time'
+    :param root:
+    :param dry_run:
+    :param case_insensitive:
+    :return:
+    """
     results: List[UpdateResult] = []
     for json_path in iter_metadata_json_files(root):
         media_path = find_matching_media(json_path, case_insensitive)
@@ -233,10 +315,12 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
             results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False, reason="no-timestamp"))
             continue
         #Update the dateTaken
-        updated, err = apply_timestamp_to_file(media_path, photo_taken_time, dry_run)
+        updated, err = apply_timestamp_to_file(media_path, photo_taken_time, creation_time, dry_run)
         if updated:
             logging.info("Updated %s from %s to %s", media_path, json_path, photo_taken_time)
             results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=True))
+            # Once the media was updated you can delete the json file
+            delete_json_file(json_path)
         else:
             if err == "dry-run":
                 logging.info("Would update %s from %s to %s", media_path, json_path, photo_taken_time)
@@ -245,10 +329,12 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
                 logging.warning("Failed to update %s: %s", media_path, err)
                 results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False, reason=err))
 
-        # Update the creation Date of the jpg file
-        update_creation_date(str(media_path), creation_time)
-
     return results
+
+
+def delete_json_file(json_path: Path) -> None:
+    json_path.unlink(missing_ok=True)
+    return None
 
 
 def update_creation_date(file_path, new_date :int):
@@ -266,22 +352,19 @@ def update_creation_date(file_path, new_date :int):
         raise ImportError("pywin32 is required for Windows. Install with: pip install pywin32")
 
     # Convert datetime to Windows FILETIME format
-    #timestamp = new_date.timestamp()
     filetime = pywintypes.Time(new_date)
-
-    #filetime = datetime.fromtimestamp(new_date, tz=win32timezone.TimeZoneInfo('GMT Standard Time', True))
-
-    # Open the file handle
-    handle = win32file.CreateFile(
-        file_path,
-        win32con.GENERIC_WRITE,
-        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
-        None,
-        win32con.OPEN_EXISTING,
-        0,
-        None
-    )
     try:
+        # Open the file handle
+        handle = win32file.CreateFile(
+            file_path,
+            win32con.GENERIC_WRITE,
+            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
+            None,
+            win32con.OPEN_EXISTING,
+            0,
+            None
+        )
+
         # Get current file times
         creation_time, access_time, write_time = win32file.GetFileTime(handle)
 
@@ -298,6 +381,11 @@ def update_creation_date(file_path, new_date :int):
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """
+    This method takes the parameters that were sent from the command line and add them to
+    :param argv:
+    :return:
+    """
     parser = argparse.ArgumentParser(description="Extract ZIP and sync media timestamps from Google Photos JSON metadata.")
     parser.add_argument("zip_path", type=Path, help="Path to the ZIP archive (e.g., Google Takeout)")
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory where a new extraction folder will be created.")
@@ -306,12 +394,135 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--case-insensitive", action="store_true", help="Allow case-insensitive filename matching if exact match is missing.")
     return parser.parse_args(argv)
 
+def get_exif_data_of_file(file_path: Path, timestamp: int):
+    """
+    This method is for assistance only. Currently, it doesn't being called, but it checks the EXIF
+    of the files.
+    The taken photo is saved in the Exif metadata of the media files. so in order to update it
+    we need to update the Exif data.
+    :param file_path:
+    :param timestamp:
+    :return:
+    """
+    img = Image.open(file_path)
+    exif_data = img.getexif()
+
+    for tag_id, value in exif_data.items():
+        tag_name = TAGS.get(tag_id, tag_id)
+        print(f"{tag_name} ({tag_id}): {value}")
+
+    return None
+
+
+def update_date_taken(file_path: Path, timestamp: int) -> None:
+    """
+    Updates the date taken field of a JPEG or movie file.
+
+    Args:
+        file_path: Path to the JPEG or movie file
+        timestamp: Unix timestamp (seconds since epoch) to set as the date taken
+    """
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Convert timestamp to datetime
+    dt = datetime.fromtimestamp(timestamp)
+
+    # Get file extension to determine file type
+    ext = file_path.suffix.lower()
+
+    if ext in ['.jpg', '.jpeg']:
+        _update_jpeg_date(file_path, dt)
+    elif ext in ['.mp4', '.mov', '.m4v', '.3gp']:
+        _update_movie_date(file_path, dt)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}. Supported formats: JPEG, MP4, MOV, M4V, 3GP")
+
+    os.utime(file_path, (timestamp, timestamp))
+
+
+def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
+    """
+    Updates EXIF date taken field for JPEG files.
+    :param file_path:
+    :param dt:
+    :return:
+    """
+
+    # Format as EXIF date string (YYYY:MM:DD HH:MM:SS)
+    exif_date = dt.strftime("%Y:%m:%d %H:%M:%S")
+
+    # Open the image
+    with Image.open(file_path) as img:
+        # Get existing EXIF data
+        #exif_dict = img.getexif()
+        # Load existing EXIF data or create new dict
+        try:
+            exif_dict = piexif.load(img.info.get('exif', b''))
+        except:
+            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+
+        # Update date/time fields
+        # 306 = DateTime
+        # 36867 = DateTimeOriginal (date/time when original image was taken)
+        # 36868 = DateTimeDigitized
+
+        #exif_dict[306] = exif_date
+        #exif_dict[36867] = exif_date
+        #exif_dict[36868] = exif_date
+        exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date
+        exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_date
+        exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_date
+
+        # Convert to bytes and save
+        exif_bytes = piexif.dump(exif_dict)
+        # Save the image with updated EXIF data
+        img.save(file_path, exif=exif_bytes, quality=95)
+
+
+def _update_movie_date(file_path: Path, dt: datetime) -> None:
+    """
+    Updates creation date field for movie files.
+    :param file_path:
+    :param dt:
+    :return:
+    """
+
+    try:
+        from mutagen.mp4 import MP4, MP4Tags
+    except ImportError:
+        raise ImportError(
+            "mutagen library is required for movie file support. "
+            "Install it with: pip install mutagen"
+        )
+
+    # Format as ISO 8601 date string (YYYY-MM-DDTHH:MM:SS)
+    iso_date = dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Open the MP4 file
+    mp4_file = MP4(str(file_path))
+
+    # Update creation date and modification date
+    # '\xa9day' is the creation date tag
+    # 'day' is also used for creation date
+    mp4_file['\xa9day'] = [iso_date]
+
+    # Also update the modification time
+    mp4_file['\xa9mod'] = [iso_date]
+
+    # Save the changes
+    mp4_file.save()
+    return None
+
 
 def main(argv: Optional[List[str]] = None) -> int:
-
+# Handles the parameters that were send with the command line
     args = parse_args(argv)
     configure_logging(args.verbose)
 
+# Make sure the zip path that was sent exists and is a file (Not a folder)
     zip_path: Path = args.zip_path
     if not zip_path.exists():
         logging.error("ZIP not found: %s", zip_path)
@@ -321,12 +532,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     try:
+        # Creates the output folder based on the zip file name
         extraction_root = ensure_new_extraction_dir(zip_path, args.output_dir)
     except Exception as exc:
         logging.error("Failed to create extraction directory: %s", exc)
         return 2
 
     try:
+        # Extracts the zip file into the new output folder
         safe_extract_zip(zip_path, extraction_root)
     except Exception as exc:
         logging.error("Extraction failed: %s", exc)
