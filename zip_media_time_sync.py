@@ -172,22 +172,19 @@ def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
     <name>.<ext>.supplemental-metadata.json
     <name>.<ext>.suppl.json
     <name>.<ext>.s.json
+Fix the     But since there could be more, we will extract the name.ext from the json file name
     :param json_filename:
     :return:
     """
 
-    if not json_filename.endswith('.json'):
+    # Splits the string into 3 parts starting from the right, then takes the first part
+    split_text = json_filename.rsplit('.', 3)
+
+    if split_text[-1] == 'json' and split_text[1] != 'json':
+        base = split_text[0] + '.' + split_text[1]
+        return base
+    else:
         return None
-    base = json_filename[:-5]  # strip .json
-    for suffix in ('.supplemental-metadata', '.metadata', '.suppl', '.s' ):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-            break
-    # base should now be the original media file name: name.ext
-    if '.' not in base:
-        # Likely not a Google Photos metadata naming pattern
-        return None
-    return base
 
 
 def find_matching_media(json_path: Path, case_insensitive: bool) -> Optional[Path]:
@@ -455,7 +452,7 @@ def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
     exif_date = dt.strftime("%Y:%m:%d %H:%M:%S")
 
     # Open the image
-    with Image.open(file_path) as img:
+    with (Image.open(file_path) as img):
         # Get existing EXIF data
         #exif_dict = img.getexif()
         # Load existing EXIF data or create new dict
@@ -475,6 +472,10 @@ def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_date
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_date
+
+
+        if piexif.ExifIFD.SceneType in exif_dict['Exif'] and isinstance(exif_dict['Exif'][piexif.ExifIFD.SceneType], int):
+            exif_dict['Exif'][piexif.ExifIFD.SceneType] = str(exif_dict['Exif'][piexif.ExifIFD.SceneType]).encode('utf-8')
 
         # Convert to bytes and save
         exif_bytes = piexif.dump(exif_dict)
