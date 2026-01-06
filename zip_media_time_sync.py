@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -181,7 +182,14 @@ Fix the     But since there could be more, we will extract the name.ext from the
     split_text = json_filename.rsplit('.', 3)
 
     if split_text[-1] == 'json' and split_text[1] != 'json':
-        base = split_text[0] + '.' + split_text[1]
+        match_number = re.search(r"\((\d+)\)", json_filename)  # \d+ matches one or more digits
+        if match_number: # We might add the following  code incase the (1) exists in the split_text[0] already.
+            # it's a special case: and re.search(r"\((\d+)\)", split_text[0]) is not None (PHOTO-2021-02-23-13-49-44 (1).jpg)
+            additional_number = match_number.group(0)
+        else:
+            additional_number = ''
+
+        base = split_text[0] + additional_number + '.' + split_text[1]
         return base
     else:
         return None
@@ -305,8 +313,13 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
     for json_path in iter_metadata_json_files(root):
         media_path = find_matching_media(json_path, case_insensitive)
         if not media_path:
-            logging.debug("No matching media for %s", json_path)
+            err= "No matching media"
+            #logging.debug("No matching media for %s", json_path)
+            logging.warning("Failed to update %s: %s", json_path, err)
+            results.append(
+            UpdateResult(media_path=media_path, json_path=json_path, timestamp=0, updated=False, reason=err))
             continue
+
         photo_taken_time, creation_time = parse_timestamp_from_json(json_path)
         if photo_taken_time is None and creation_time is None:
             results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False, reason="no-timestamp"))
