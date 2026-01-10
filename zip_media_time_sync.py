@@ -38,25 +38,28 @@ try:
     import win32file
     import win32con
     import pywintypes
+
     WINDOWS_AVAILABLE = True
 
 except ImportError as e:
     WINDOWS_AVAILABLE = False
-    print(f"An ImportError occurred: {e}")
-    print(f"Name of the missing module/item: {e.name}")
+    # Note: logging not yet configured, so use stderr for import-time messages
+    print(f"An ImportError occurred: {e}", file=sys.stderr)
+    print(f"Name of the missing module/item: {e.name}", file=sys.stderr)
     # Note: path might be None if the issue isn't file-related.
-#   print(f"Path checked: {e.path}")
-    print("Warning: pywin32 not installed. Install it with: python -m pip install pywin32")
+    #   print(f"Path checked: {e.path}")
+    print("Warning: pywin32 not installed. Install it with: python -m pip install pywin32", file=sys.stderr)
 
 
 
 # ----------------------------- Logging Utilities -----------------------------
 
 
-def configure_logging(verbosity: int) -> None:
+def configure_logging(verbosity: int, log_file: Optional[Path] = None) -> None:
     """
     Handling the logging within the process
-    :param verbosity:
+    :param verbosity: Verbosity level (0=WARNING, 1=INFO, 2+=DEBUG)
+    :param log_file: Optional path to log file. If provided, logs will be written to file.
     :return:
     """
     level = logging.WARNING
@@ -64,10 +67,34 @@ def configure_logging(verbosity: int) -> None:
         level = logging.DEBUG
     elif verbosity == 1:
         level = logging.INFO
+
+    # Configure handlers
+    handlers = []
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    handlers.append(console_handler)
+
+    # File handler if log file is provided
+    if log_file:
+        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)  # Always log everything to file
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        handlers.append(file_handler)
+
+    # Configure root logger
     logging.basicConfig(
-        level=level,
-        format="%(levelname)s: %(message)s",
+        level=logging.DEBUG,  # Set to lowest level, handlers will filter
+        handlers=handlers,
+        force=True  # Override any existing configuration
     )
+    # Suppress EXIF-related logging from PIL/Pillow and piexif libraries
+    logging.getLogger('PIL').setLevel(logging.WARNING)
+    logging.getLogger('Pillow').setLevel(logging.WARNING)
+    logging.getLogger('piexif').setLevel(logging.WARNING)
 
 
 # ------------------------------- Data Classes --------------------------------
@@ -173,7 +200,6 @@ def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
     <name>.<ext>.supplemental-metadata.json
     <name>.<ext>.suppl.json
     <name>.<ext>.s.json
-Fix the     But since there could be more, we will extract the name.ext from the json file name
     :param json_filename:
     :return:
     """
@@ -239,7 +265,6 @@ def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] 
         logging.warning("Failed to read JSON %s: %s", json_path, exc)
         return None
 
-
     # Google Photos metadata commonly has objects with 'timestamp' fields
     def extract(obj: Dict) -> Optional[int]:
         if not isinstance(obj, dict):
@@ -260,7 +285,6 @@ def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] 
     if photo_taken_time is not None and creation_time is not None:
         return photo_taken_time, creation_time
 
-
     # for key in ('photoTakenTime', 'creationTime', 'imageCreationTime', 'modificationTime'):
     #     val = data.get(key)
     #     ts = extract(val)
@@ -271,7 +295,8 @@ def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] 
     return None
 
 
-def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_time: int, dry_run: bool) -> Tuple[bool, str]:
+def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_time: int, dry_run: bool) -> Tuple[
+    bool, str]:
     """
     This method updates the timestamp of the file.
     It set the Access Time (atime) and Modification Time (mtime) of the jpeg files.
@@ -288,10 +313,9 @@ def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_ti
     try:
         if dry_run:
             return False, "dry-run"
-        #Update access time and modification time
+        # Update access time and modification time
 
-
-        #Update the date taken time
+        # Update the date taken time
         update_date_taken(media_path, photo_taken_time)
         # Update the creation Date of the jpg file
         update_creation_date(str(media_path), creation_time)
@@ -322,22 +346,28 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
 
         photo_taken_time, creation_time = parse_timestamp_from_json(json_path)
         if photo_taken_time is None and creation_time is None:
-            results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False, reason="no-timestamp"))
+            results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False,
+                                        reason="no-timestamp"))
             continue
-        #Update the dateTaken
+        # Update the dateTaken
         updated, err = apply_timestamp_to_file(media_path, photo_taken_time, creation_time, dry_run)
         if updated:
             logging.info("Updated %s from %s to %s", media_path, json_path, photo_taken_time)
-            results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=True))
+            results.append(
+                UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=True))
             # Once the media was updated you can delete the json file
             delete_json_file(json_path)
         else:
             if err == "dry-run":
                 logging.info("Would update %s from %s to %s", media_path, json_path, photo_taken_time)
-                results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False, reason="dry-run"))
+                results.append(
+                    UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False,
+                                 reason="dry-run"))
             else:
                 logging.warning("Failed to update %s: %s", media_path, err)
-                results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False, reason=err))
+                results.append(
+                    UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False,
+                                 reason=err))
 
     return results
 
@@ -347,7 +377,7 @@ def delete_json_file(json_path: Path) -> None:
     return None
 
 
-def update_creation_date(file_path, new_date :int):
+def update_creation_date(file_path, new_date: int):
     """
     Update the creation date of a file.
 
@@ -379,8 +409,8 @@ def update_creation_date(file_path, new_date :int):
         creation_time, access_time, write_time = win32file.GetFileTime(handle)
 
         # Update only the creation time, keep others unchanged
-        win32file.SetFileTime(handle, filetime, access_time, write_time,False)
-        print(f"Successfully updated creation date of '{file_path}' to {new_date}")
+        win32file.SetFileTime(handle, filetime, access_time, write_time, False)
+        logging.info(f"Successfully updated creation date of '{file_path}' to {new_date}")
     finally:
         win32file.CloseHandle(handle)
 
@@ -396,13 +426,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     :param argv:
     :return:
     """
-    parser = argparse.ArgumentParser(description="Extract ZIP and sync media timestamps from Google Photos JSON metadata.")
+    parser = argparse.ArgumentParser(
+        description="Extract ZIP and sync media timestamps from Google Photos JSON metadata.")
     parser.add_argument("zip_path", type=Path, help="Path to the ZIP archive (e.g., Google Takeout)")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Directory where a new extraction folder will be created.")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Directory where a new extraction folder will be created.")
     parser.add_argument("--dry-run", action="store_true", help="Do not modify files, just report intended changes.")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (use -v or -vv).")
-    parser.add_argument("--case-insensitive", action="store_true", help="Allow case-insensitive filename matching if exact match is missing.")
+    parser.add_argument("--case-insensitive", action="store_true",
+                        help="Allow case-insensitive filename matching if exact match is missing.")
     return parser.parse_args(argv)
+
 
 def get_exif_data_of_file(file_path: Path, timestamp: int):
     """
@@ -417,9 +451,10 @@ def get_exif_data_of_file(file_path: Path, timestamp: int):
     img = Image.open(file_path)
     exif_data = img.getexif()
 
+    logging.info("Print the tags details of %s", file_path)
     for tag_id, value in exif_data.items():
         tag_name = TAGS.get(tag_id, tag_id)
-        print(f"{tag_name} ({tag_id}): {value}")
+        logging.info(f"{tag_name} ({tag_id}): {value}")
 
     return None
 
@@ -465,6 +500,7 @@ def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
     exif_date = dt.strftime("%Y:%m:%d %H:%M:%S")
 
     # Open the image
+
     with (Image.open(file_path) as img):
         # Get existing EXIF data
         #exif_dict = img.getexif()
@@ -479,9 +515,9 @@ def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
         # 36867 = DateTimeOriginal (date/time when original image was taken)
         # 36868 = DateTimeDigitized
 
-        #exif_dict[306] = exif_date
-        #exif_dict[36867] = exif_date
-        #exif_dict[36868] = exif_date
+        # exif_dict[306] = exif_date
+        # exif_dict[36867] = exif_date
+        # exif_dict[36868] = exif_date
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_date
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_date
@@ -532,12 +568,18 @@ def _update_movie_date(file_path: Path, dt: datetime) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-# Handles the parameters that were send with the command line
+    # Handles the parameters that were send with the command line
     args = parse_args(argv)
-    configure_logging(args.verbose)
 
-# Make sure the zip path that was sent exists and is a file (Not a folder)
+    # Get zip file name and create log file path
     zip_path: Path = args.zip_path
+    log_file = zip_path.parent / f"{zip_path.stem}.log"
+
+    # Configure logging with log file
+    configure_logging(args.verbose, log_file)
+    logging.info("Logging to file: %s", log_file)
+
+    # Make sure the zip path that was sent exists and is a file (Not a folder)
     if not zip_path.exists():
         logging.error("ZIP not found: %s", zip_path)
         return 2
@@ -567,16 +609,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     failures = sum(1 for r in results if (not r.updated and r.reason not in ('dry-run', 'no-timestamp')))
     total_pairs = len(results)
 
-    print(f"Extraction folder: {extraction_root}")
-    print(f"Metadata/media pairs found: {total_pairs}")
+    logging.info(f"Extraction folder: {extraction_root}")
+    logging.info(f"Metadata/media pairs found: {total_pairs}")
     if args.dry_run:
-        print(f"Would update: {would_update}")
-    print(f"Updated: {updated}")
-    print(f"Missing timestamp: {missing_ts}")
-    print(f"Failures: {failures}")
+        logging.info(f"Would update: {would_update}")
+    logging.info(f"Updated: {updated}")
+    logging.info(f"Missing timestamp: {missing_ts}")
+    logging.info(f"Failures: {failures}")
 
     return 0 if failures == 0 else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
