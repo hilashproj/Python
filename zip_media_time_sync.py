@@ -132,6 +132,29 @@ def handle_none_existing_path(zip_path: Path, output_dir: Optional[Path])  -> Pa
         suffix += 1
     return candidate
 
+
+def handle_existing_path(zip_path: Path, output_dir: Optional[Path])  -> Path:
+    """
+    determine the extract folder path
+    :param zip_path:
+    :param output_dir:
+    :return:
+    """
+    zip_stem = zip_path.stem #takeout-20251228T183523Z-3-001
+    parent = output_dir if output_dir else zip_path.parent
+    # Ensure a deterministic new folder name if it doesn't exist
+    # takeout-20251228T183523Z-3-001.zip file. A folder wil be created {parent}\takeout-20251228T183523Z
+    # so that all the zip content will be extracted into the same folders
+
+    # Find the last occurrence of -3- and remove everything from there
+    if '-3-' in zip_stem:
+        #return
+        candidate = parent / f"{zip_stem.rsplit('-3-', 1)[0]}_extracted"
+    else:
+        candidate = parent / f"{zip_stem}_extracted"
+
+    return candidate
+
 def handle_none_existing_file(zip_path: Path, suffix_name: str, output_dir: Optional[Path])  -> Path:
     """
     determine the extract folder path
@@ -182,8 +205,9 @@ def ensure_new_extraction_dir(zip_path: Path, output_dir: Optional[Path]) -> Pat
     #     candidate = parent / f"{zip_stem}_extracted_{suffix}"
     #     suffix += 1
 
-    candidate = handle_none_existing_path(zip_path, output_dir)
-    candidate.mkdir(parents=True, exist_ok=False)
+    candidate = handle_existing_path(zip_path, output_dir)
+    os.makedirs(str(candidate), exist_ok=True)
+    # candidate.mkdir(parents=True, exist_ok=False)
     return candidate
 
 
@@ -380,6 +404,8 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
     """
     results: List[UpdateResult] = []
     for json_path in iter_metadata_json_files(root):
+        if json_path.name in ["user-generated-memory-titles.json", "metadata.json"]:
+            continue
         media_path = find_matching_media(json_path, case_insensitive)
         if not media_path:
             err= "No matching media"
@@ -638,6 +664,70 @@ def _update_movie_date(file_path: Path, dt: datetime) -> None:
     return None
 
 
+def find_takeout_zip_files(directory: Path) -> List[Path]:
+    """
+    Find all zip files matching the pattern: takeout-ddddddddTddddddZ-3-ddd.zip
+
+    Pattern breakdown:
+    - takeout- : prefix
+    - ddddddddTddddddZ : date/time in ISO 8601 format (e.g., 20240101T120000Z)
+    - -3- : constant separator
+    - ddd : numbers starting from 001
+
+    :param directory: Directory to search for zip files
+    :return: List of Path objects for matching zip files, sorted by the numeric suffix
+    """
+    pattern = re.compile(r'^takeout-\d{8}T\d{6}Z-3-\d{3}\.zip$', re.IGNORECASE)
+    matching_files = []
+
+    if not directory.exists() or not directory.is_dir():
+        return matching_files
+
+    for file_path in directory.iterdir():
+        if file_path.is_file() and file_path.suffix.lower() == '.zip':
+            if pattern.match(file_path.name):
+                matching_files.append(file_path)
+
+    # Sort by the numeric suffix (the last ddd part) to process in order
+    def get_suffix_number(file_path: Path) -> int:
+        match = re.search(r'-(\d{3})\.zip$', file_path.name, re.IGNORECASE)
+        return int(match.group(1)) if match else 999
+
+    matching_files.sort(key=get_suffix_number)
+    return matching_files
+
+
+def process_takeout_zips(directory: Path, output_dir: Optional[Path] = None) -> Path | None:
+    """
+    Find all takeout zip files in the directory and extract each one to an output folder.
+
+    :param directory: Directory containing the takeout zip files
+    :param output_dir: Optional output directory. If None, extracts to the same directory as zip files.
+    :return: List of extraction root directories created
+    """
+    zip_files = find_takeout_zip_files(directory)
+    extraction_roots = []
+
+    if not zip_files:
+        logging.error("No matching takeout zip files found in %s", directory)
+        return None
+
+    logging.info("Found %d takeout zip file(s) to process", len(zip_files))
+    #assuming all the zip files within that folder contain the same structure that's why we check the first zip file
+    # and create the main folder that ll the zip files will be extracted to that folder
+
+    extraction_root = ensure_new_extraction_dir(zip_files[0], output_dir)
+    for zip_file in zip_files:
+        logging.info("Processing zip file: %s", zip_file)
+        try:
+            safe_extract_zip(zip_file, extraction_root)
+            #extraction_roots.append(extraction_root)
+            logging.info("Successfully extracted %s to %s", zip_file, extraction_root)
+        except Exception as exc:
+            logging.error("Failed to extract %s: %s", zip_file, exc)
+
+    return extraction_root
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     # Handles the parameters that were send with the command line
@@ -651,28 +741,33 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Configure logging with log file
     configure_logging(args.verbose, log_file)
-    logging.info("Logging to file: %s", log_file)
+    print(f"Logging to file: {log_file}")
+
 
     # Make sure the zip path that was sent exists and is a file (Not a folder)
-    if not zip_path.exists():
-        logging.error("ZIP not found: %s", zip_path)
-        return 2
-    if not zip_path.is_file():
-        logging.error("Not a file: %s", zip_path)
-        return 2
+    # if not zip_path.exists():
+    #     logging.error("ZIP not found: %s", zip_path)
+    #     return 2
+    # if not zip_path.is_file():
+    #     logging.error("Not a file: %s", zip_path)
+    #     return 2
 
     try:
         # Creates the output folder based on the zip file name
-        extraction_root = ensure_new_extraction_dir(zip_path, args.output_dir)
+        # extraction_root = ensure_new_extraction_dir(zip_path, args.output_dir)
+        extraction_root = process_takeout_zips(zip_path, args.output_dir)
     except Exception as exc:
         logging.error("Failed to create extraction directory: %s", exc)
         return 2
 
-    try:
-        # Extracts the zip file into the new output folder
-        safe_extract_zip(zip_path, extraction_root)
-    except Exception as exc:
-        logging.error("Extraction failed: %s", exc)
+    # try:
+    #     # Extracts the zip file into the new output folder
+    #     safe_extract_zip(zip_path, extraction_root)
+    # except Exception as exc:
+    #     logging.error("Extraction failed: %s", exc)
+    #     return 2
+
+    if extraction_root is None:
         return 2
 
     results = scan_and_update(extraction_root, dry_run=args.dry_run, case_insensitive=args.case_insensitive)
