@@ -19,6 +19,7 @@ Usage example:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import re
@@ -114,6 +115,48 @@ class UpdateResult:
 
 # --------------------------------- Helpers -----------------------------------
 
+def handle_none_existing_path(zip_path: Path, output_dir: Optional[Path])  -> Path:
+    """
+    determine the extract folder path
+    :param zip_path:
+    :param output_dir:
+    :return:
+    """
+    zip_stem = zip_path.stem
+    parent = output_dir if output_dir else zip_path.parent
+    # Ensure a deterministic new folder name. Avoid clobbering existing contents.
+    candidate = parent / f"{zip_stem}_extracted"
+    suffix = 1
+    while candidate.exists():
+        candidate = parent / f"{zip_stem}_extracted_{suffix}"
+        suffix += 1
+    return candidate
+
+def handle_none_existing_file(zip_path: Path, suffix_name: str, output_dir: Optional[Path])  -> Path:
+    """
+    determine the extract folder path
+    :param zip_path:
+    :param suffix_name:
+    :param output_dir:
+    :return:
+    """
+    zip_stem = zip_path.stem
+    parent = output_dir if output_dir else zip_path.parent
+    # Ensure a deterministic new folder name. Avoid clobbering existing contents.
+    if suffix_name != "":
+        candidate = parent / f"{zip_stem}{suffix_name}"
+    else:
+        candidate = parent / f"{zip_stem}"
+
+    suffix = 1
+    while candidate.exists():
+        if suffix_name != "":
+            candidate = parent / f"{zip_stem}_{suffix}{suffix_name}"
+        else:
+            candidate = parent / f"{zip_stem}_{suffix}"
+
+        suffix += 1
+    return candidate
 
 def ensure_new_extraction_dir(zip_path: Path, output_dir: Optional[Path]) -> Path:
     """
@@ -130,14 +173,16 @@ def ensure_new_extraction_dir(zip_path: Path, output_dir: Optional[Path]) -> Pat
     :param output_dir:
     :return:
     """
-    zip_stem = zip_path.stem
-    parent = output_dir if output_dir else zip_path.parent
-    # Ensure a deterministic new folder name. Avoid clobbering existing contents.
-    candidate = parent / f"{zip_stem}_extracted"
-    suffix = 1
-    while candidate.exists():
-        candidate = parent / f"{zip_stem}_extracted_{suffix}"
-        suffix += 1
+    # zip_stem = zip_path.stem
+    # parent = output_dir if output_dir else zip_path.parent
+    # # Ensure a deterministic new folder name. Avoid clobbering existing contents.
+    # candidate = parent / f"{zip_stem}_extracted"
+    # suffix = 1
+    # while candidate.exists():
+    #     candidate = parent / f"{zip_stem}_extracted_{suffix}"
+    #     suffix += 1
+
+    candidate = handle_none_existing_path(zip_path, output_dir)
     candidate.mkdir(parents=True, exist_ok=False)
     return candidate
 
@@ -372,6 +417,32 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
     return results
 
 
+def write_results_to_csv(results: List[UpdateResult], csv_path: Path) -> None:
+    """
+    Write the update results to a CSV file.
+
+    :param results: List of UpdateResult objects
+    :param csv_path: Path where the CSV file should be written
+    :return:
+    """
+    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['file_name','file_path', 'status', 'error_reason']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+        writer.writeheader()
+        for result in results:
+            status = 'success' if result.updated else 'error'
+            error_reason = result.reason if not result.updated else ''
+
+            writer.writerow({
+                'file_name': str(result.media_path.name) if result.media_path and result.media_path.name else str(result.json_path.name),
+                'file_path': str(result.media_path) if result.media_path else str(result.json_path),
+                'status': status,
+                'error_reason': error_reason
+            })
+
+
+
 def delete_json_file(json_path: Path) -> None:
     json_path.unlink(missing_ok=True)
     return None
@@ -567,13 +638,16 @@ def _update_movie_date(file_path: Path, dt: datetime) -> None:
     return None
 
 
+
 def main(argv: Optional[List[str]] = None) -> int:
     # Handles the parameters that were send with the command line
     args = parse_args(argv)
 
     # Get zip file name and create log file path
+
     zip_path: Path = args.zip_path
-    log_file = zip_path.parent / f"{zip_path.stem}.log"
+    # log_file = zip_path.parent / f"{zip_path.stem}.log"
+    log_file = handle_none_existing_file(zip_path,".log", args.output_dir)
 
     # Configure logging with log file
     configure_logging(args.verbose, log_file)
@@ -603,6 +677,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     results = scan_and_update(extraction_root, dry_run=args.dry_run, case_insensitive=args.case_insensitive)
 
+    # # Write results to CSV
+    csv_file = handle_none_existing_file(zip_path,".csv", args.output_dir)
+    # csv_file = zip_path.parent / f"{zip_path.stem}_results.csv"
+    write_results_to_csv(results, csv_file)
+    logging.info("Results written to CSV: %s", csv_file)
     updated = sum(1 for r in results if r.updated)
     would_update = sum(1 for r in results if (not r.updated and r.reason == 'dry-run'))
     missing_ts = sum(1 for r in results if r.reason == 'no-timestamp')
