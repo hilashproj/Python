@@ -24,15 +24,17 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import os
 from datetime import datetime
+from warnings import catch_warnings
 
 import piexif
-from PIL import Image
+from PIL import Image, PngImagePlugin
 from PIL.ExifTags import TAGS
 
 try:
@@ -219,6 +221,26 @@ def _is_within_directory(directory: Path, target: Path) -> bool:
         return common == str(directory_abs)
     except Exception:
         return False
+
+
+
+def move_zip_file_to_backup_dir(zip_path: Path, output_dir: Path) -> None:
+    # Ensure the destination folder exists (optional, but good practice)
+    destination_folder = output_dir.parent / "backup"
+    if not os.path.exists(destination_folder):
+        os.makedirs(destination_folder)
+
+    # Construct the full destination path including the file name
+    destination_path = os.path.join(destination_folder, os.path.basename(zip_path))
+
+    # Move the file
+    try:
+        shutil.move(zip_path, destination_path)
+        print(f"Successfully moved '{zip_path}' to '{destination_path}'")
+    except FileNotFoundError:
+        print(f"Error: The source file '{zip_path}' was not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 
 def safe_extract_zip(zip_path: Path, destination: Path) -> None:
@@ -577,12 +599,51 @@ def update_date_taken(file_path: Path, timestamp: int) -> None:
 
     if ext in ['.jpg', '.jpeg']:
         _update_jpeg_date(file_path, dt)
+    elif ext in ['.png']:
+        set_png_date_taken(file_path, dt)
+    elif ext in ['.gif']:
+            _update_gif_date(file_path, dt)
     elif ext in ['.mp4', '.mov', '.m4v', '.3gp']:
         _update_movie_date(file_path, dt)
     else:
         raise ValueError(f"Unsupported file type: {ext}. Supported formats: JPEG, MP4, MOV, M4V, 3GP")
 
     os.utime(file_path, (timestamp, timestamp))
+
+def _update_gif_date(file_path: Path, dt: datetime) -> None:
+    """
+    In 2026, updating the "Date Taken" or "Media Created" field for a GIF is fundamentally different from a JPEG because
+    GIF files do not natively support EXIF metadata.
+    The creation date is being updated by this command:
+    os.utime(file_path, (timestamp, timestamp))
+    Outside of this method since it's also being called for the other extensions
+
+    :param file_path:
+    :param dt:
+    :return:
+    """
+    """
+    Sets the creation and modification date for a GIF.
+    Format for timestamp_str: "YYYY:MM:DD HH:MM:SS"
+    """
+
+
+def set_png_date_taken(file_path, dt: datetime):
+    """
+    Sets the 'Date Taken' for a PNG.
+    date_str format: 'YYYY:MM:DD HH:MM:SS'
+    """
+    # Format as EXIF date string (YYYY:MM:DD HH:MM:SS)
+    date_str = dt.strftime("%Y:%m:%d %H:%M:%S")
+
+    with Image.open(file_path) as img:
+        metadata = PngImagePlugin.PngInfo()
+
+        # Windows reads 'Creation Time' for PNG Date Taken
+        metadata.add_text("Creation Time", date_str)
+
+        # Save with the new metadata
+        img.save(file_path, "PNG", pnginfo=metadata)
 
 
 def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
@@ -623,10 +684,23 @@ def _update_jpeg_date(file_path: Path, dt: datetime) -> None:
         if piexif.ExifIFD.SceneType in exif_dict['Exif'] and isinstance(exif_dict['Exif'][piexif.ExifIFD.SceneType], int):
             exif_dict['Exif'][piexif.ExifIFD.SceneType] = str(exif_dict['Exif'][piexif.ExifIFD.SceneType]).encode('utf-8')
 
-        # Convert to bytes and save
-        exif_bytes = piexif.dump(exif_dict)
-        # Save the image with updated EXIF data
-        img.save(file_path, exif=exif_bytes, quality=95)
+        try:
+            # Convert to bytes and save
+            exif_bytes = piexif.dump(exif_dict)
+            # Save the image with updated EXIF data
+            img.save(file_path, exif=exif_bytes, quality=95)
+        except Exception as err:
+            #logging.warning("Failed to update %s: %s", file_path, err)
+            # Remove potential corrupted thumbnail data
+            if "thumbnail" in exif_dict:
+                del exif_dict["thumbnail"]
+            if "1st" in exif_dict:
+                del exif_dict["1st"]
+
+            exif_bytes = piexif.dump(exif_dict)
+            img.save(file_path, exif=exif_bytes, quality=95)
+
+
 
 
 def _update_movie_date(file_path: Path, dt: datetime) -> None:
@@ -723,6 +797,8 @@ def process_takeout_zips(directory: Path, output_dir: Optional[Path] = None) -> 
             safe_extract_zip(zip_file, extraction_root)
             #extraction_roots.append(extraction_root)
             logging.info("Successfully extracted %s to %s", zip_file, extraction_root)
+            move_zip_file_to_backup_dir(zip_file, output_dir)
+
         except Exception as exc:
             logging.error("Failed to extract %s: %s", zip_file, exc)
 
