@@ -157,28 +157,30 @@ def handle_existing_path(zip_path: Path, output_dir: Optional[Path])  -> Path:
 
     return candidate
 
-def handle_none_existing_file(zip_path: Path, suffix_name: str, output_dir: Optional[Path])  -> Path:
+def handle_none_existing_file(zip_path: Path, suffix_name: str, output_dir: Optional[Path], report_name)  -> Path:
     """
-    determine the extract folder path
+    determine the relevant file name. used for csv and log files
+    :param report_name:
     :param zip_path:
     :param suffix_name:
     :param output_dir:
     :return:
     """
-    zip_stem = zip_path.stem
+    if report_name is None:
+        report_name = zip_path.stem
     parent = output_dir if output_dir else zip_path.parent
     # Ensure a deterministic new folder name. Avoid clobbering existing contents.
     if suffix_name != "":
-        candidate = parent / f"{zip_stem}{suffix_name}"
+        candidate = parent / f"{report_name}{suffix_name}"
     else:
-        candidate = parent / f"{zip_stem}"
+        candidate = parent / f"{report_name}"
 
     suffix = 1
     while candidate.exists():
         if suffix_name != "":
-            candidate = parent / f"{zip_stem}_{suffix}{suffix_name}"
+            candidate = parent / f"{report_name}_{suffix}{suffix_name}"
         else:
-            candidate = parent / f"{zip_stem}_{suffix}"
+            candidate = parent / f"{report_name}_{suffix}"
 
         suffix += 1
     return candidate
@@ -198,14 +200,6 @@ def ensure_new_extraction_dir(zip_path: Path, output_dir: Optional[Path]) -> Pat
     :param output_dir:
     :return:
     """
-    # zip_stem = zip_path.stem
-    # parent = output_dir if output_dir else zip_path.parent
-    # # Ensure a deterministic new folder name. Avoid clobbering existing contents.
-    # candidate = parent / f"{zip_stem}_extracted"
-    # suffix = 1
-    # while candidate.exists():
-    #     candidate = parent / f"{zip_stem}_extracted_{suffix}"
-    #     suffix += 1
 
     candidate = handle_existing_path(zip_path, output_dir)
     os.makedirs(str(candidate), exist_ok=True)
@@ -283,7 +277,7 @@ def iter_metadata_json_files(root: Path) -> Iterable[Path]:
     return root.rglob('*.json')
 
 
-def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
+def candidate_media_name_from_json(json_filename: str, check_add_num = False) -> Optional[str]:
     """
      Accept patterns like:
     <name>.<ext>.json
@@ -291,6 +285,7 @@ def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
     <name>.<ext>.supplemental-metadata.json
     <name>.<ext>.suppl.json
     <name>.<ext>.s.json
+    :param check_add_num:
     :param json_filename:
     :return:
     """
@@ -299,18 +294,23 @@ def candidate_media_name_from_json(json_filename: str) -> Optional[str]:
     split_text = json_filename.rsplit('.', 3)
 
     if split_text[-1] == 'json' and split_text[1] != 'json':
-        match_number = re.search(r"\((\d+)\)", json_filename)  # \d+ matches one or more digits
-        if match_number: # We might add the following  code incase the (1) exists in the split_text[0] already.
-            # it's a special case: and re.search(r"\((\d+)\)", split_text[0]) is not None (PHOTO-2021-02-23-13-49-44 (1).jpg)
-            additional_number = match_number.group(0)
-        else:
-            additional_number = ''
+        if check_add_num:
+            match_number = re.search(r"\((\d+)\)", json_filename)  # \d+ matches one or more digits
+            if match_number: # We might add the following  code incase the (1) exists in the split_text[0] already.
+                # it's a special case: and re.search(r"\((\d+)\)", split_text[0]) is not None (PHOTO-2021-02-23-13-49-44 (1).jpg)
+                additional_number = match_number.group(0)
+            else:
+                additional_number = ''
 
-        base = split_text[0] + additional_number + '.' + split_text[1]
+            base = split_text[0] + additional_number + '.' + split_text[1]
+        else:
+            base = split_text[0] + '.' + split_text[1]
+
         return base
+    elif split_text[-1] == 'json':
+        return split_text[0]
     else:
         return None
-
 
 def find_matching_media(json_path: Path, case_insensitive: bool) -> Optional[Path]:
     """
@@ -322,6 +322,17 @@ def find_matching_media(json_path: Path, case_insensitive: bool) -> Optional[Pat
     candidate_name = candidate_media_name_from_json(json_path.name)
     if not candidate_name:
         return None
+    # the with_name() method is used to return a new path object where the final component
+    # (the filename or directory name) is replaced by a new name.
+    direct_candidate = json_path.with_name(candidate_name)
+    if direct_candidate.exists():
+        return direct_candidate
+
+#In case there is a special case of additional numbers that should be handled
+    candidate_name = candidate_media_name_from_json(json_path.name , True)
+    if not candidate_name:
+        return None
+
     # the with_name() method is used to return a new path object where the final component
     # (the filename or directory name) is replaced by a new name.
     direct_candidate = json_path.with_name(candidate_name)
@@ -386,6 +397,22 @@ def parse_timestamp_from_json(json_path: Path) -> tuple[int | None, int | None] 
     return None
 
 
+
+def load_json_to_dict(json_file_path):
+    """
+    Load all values from a JSON file and return as a Python dictionary.
+    """
+    with open(json_file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return data
+
+def get_relevant_value(json_dict, key):
+    """
+    Returns the relevant value for the given key from the JSON dictionary.
+    """
+    return json_dict.get(key)
+
+
 def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_time: int, dry_run: bool) -> Tuple[
     bool, str]:
     """
@@ -415,17 +442,24 @@ def apply_timestamp_to_file(media_path: Path, photo_taken_time: int, creation_ti
         return False, str(exc)
 
 
-def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> List[UpdateResult]:
+def scan_and_update(extraction_root: Path, output_dir, report_name, *, dry_run: bool, case_insensitive: bool) -> List[UpdateResult]:
     """
     This method finds all the json files, then finds all the relevant file files that relates
     to the json file inorder to change its 'Photo Taken Time' and 'Creation Time'
-    :param root:
+    :param output_dir:
+    :param extraction_root:
     :param dry_run:
     :param case_insensitive:
     :return:
     """
+
+    # # Write results to CSV
+    csv_file = handle_none_existing_file(extraction_root, ".csv", output_dir, report_name)
+    # csv_file = zip_path.parent / f"{zip_path.stem}_results.csv"
+    # write_header_to_csv(csv_file)
+
     results: List[UpdateResult] = []
-    for json_path in iter_metadata_json_files(root):
+    for json_path in iter_metadata_json_files(extraction_root):
         if json_path.name in ["user-generated-memory-titles.json", "metadata.json"]:
             continue
         media_path = find_matching_media(json_path, case_insensitive)
@@ -433,21 +467,26 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
             err= "No matching media"
             #logging.debug("No matching media for %s", json_path)
             logging.warning("Failed to update %s: %s", json_path, err)
-            results.append(
-            UpdateResult(media_path=media_path, json_path=json_path, timestamp=0, updated=False, reason=err))
+            updated_result = UpdateResult(media_path=media_path, json_path=json_path, timestamp=0, updated=False, reason=err)
+            results.append(updated_result)
+            write_line_to_csv(updated_result, csv_file)
             continue
 
         photo_taken_time, creation_time = parse_timestamp_from_json(json_path)
         if photo_taken_time is None and creation_time is None:
-            results.append(UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False,
-                                        reason="no-timestamp"))
+            updated_result = UpdateResult(media_path=media_path, json_path=json_path, timestamp=-1, updated=False,
+                         reason="no-timestamp")
+            results.append(updated_result)
+            write_line_to_csv(updated_result, csv_file)
             continue
         # Update the dateTaken
         updated, err = apply_timestamp_to_file(media_path, photo_taken_time, creation_time, dry_run)
         if updated:
             logging.info("Updated %s from %s to %s", media_path, json_path, photo_taken_time)
-            results.append(
-                UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=True))
+
+            updated_result = UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=True)
+            results.append(updated_result)
+            write_line_to_csv(updated_result, csv_file)
             # Once the media was updated you can delete the json file
             delete_json_file(json_path)
         else:
@@ -458,36 +497,60 @@ def scan_and_update(root: Path, *, dry_run: bool, case_insensitive: bool) -> Lis
                                  reason="dry-run"))
             else:
                 logging.warning("Failed to update %s: %s", media_path, err)
-                results.append(
-                    UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time, updated=False,
-                                 reason=err))
+                updated_result = UpdateResult(media_path=media_path, json_path=json_path, timestamp=photo_taken_time,
+                                      updated=False, reason=err)
+                results.append(updated_result)
+                write_line_to_csv(updated_result, csv_file)
 
     return results
 
 
-def write_results_to_csv(results: List[UpdateResult], csv_path: Path) -> None:
+def write_header_to_csv(csv_path: Path) -> None:
     """
-    Write the update results to a CSV file.
-
-    :param results: List of UpdateResult objects
+    Open a new csv file and add its header
     :param csv_path: Path where the CSV file should be written
     :return:
     """
-    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['file_name','file_path', 'status', 'error_reason']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    # with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+    fieldnames = ['file_name','file_path', 'status', 'error_reason']
+    #     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    #
+    #     writer.writeheader()
 
-        writer.writeheader()
-        for result in results:
-            status = 'success' if result.updated else 'error'
-            error_reason = result.reason if not result.updated else ''
+        # Create file and write headers
+    with open(csv_path, mode='w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(fieldnames)
 
-            writer.writerow({
-                'file_name': str(result.media_path.name) if result.media_path and result.media_path.name else str(result.json_path.name),
-                'file_path': str(result.media_path) if result.media_path else str(result.json_path),
-                'status': status,
-                'error_reason': error_reason
-            })
+    logging.info("Results written to CSV: %s", csv_path)
+
+
+def write_line_to_csv(result: UpdateResult, csv_path: Path) -> None:
+    """
+    Open a new csv file and add line for every relevant file
+    :param result:
+    :param csv_path:
+    :return:
+    """
+    file_exists = os.path.isfile(csv_path)
+
+    fieldnames = ['file_name', 'file_path', 'status', 'error_reason']
+    with open(csv_path, "a", newline="", encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames)
+
+        # Only write header if the file is brand new/empty
+        if not file_exists or os.path.getsize(csv_path) == 0:
+            writer.writeheader()
+
+        status = 'success' if result.updated else 'error'
+        error_reason = result.reason if not result.updated else ''
+
+        writer.writerow({
+            'file_name': str(result.media_path.name) if result.media_path and result.media_path.name else str(result.json_path.name),
+            'file_path': str(result.media_path) if result.media_path else str(result.json_path),
+            'status': status,
+            'error_reason': error_reason
+        })
 
 
 
@@ -554,6 +617,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (use -v or -vv).")
     parser.add_argument("--case-insensitive", action="store_true",
                         help="Allow case-insensitive filename matching if exact match is missing.")
+    parser.add_argument("--ignore-zip", type=Path, default=None,
+                        help="If set can run without the need of zip files if doesn't exist.")
+    parser.add_argument("--report-name", default=None,
+                        help="Report name to be used for the log and csv file. You better send the google name.")
     return parser.parse_args(argv)
 
 
@@ -602,8 +669,11 @@ def update_date_taken(file_path: Path, timestamp: int) -> None:
     elif ext in ['.png']:
         set_png_date_taken(file_path, dt)
     elif ext in ['.gif']:
-            _update_gif_date(file_path, dt)
-    elif ext in ['.mp4', '.mov', '.m4v', '.3gp']:
+        _update_gif_date(file_path, dt)
+    # For 3GP files, use ExifTool or ffmpeg for better compatibility
+    elif ext in ['.3gp']:
+        _update_3gp_date(file_path, dt)
+    elif ext in ['.mp4', '.mov', '.m4v']:
         _update_movie_date(file_path, dt)
     else:
         raise ValueError(f"Unsupported file type: {ext}. Supported formats: JPEG, MP4, MOV, M4V, 3GP")
@@ -738,6 +808,207 @@ def _update_movie_date(file_path: Path, dt: datetime) -> None:
     return None
 
 
+def _update_3gp_date(file_path: Path, dt: datetime) -> None:
+    """Updates creation date field for 3GP files using ExifTool or ffmpeg."""
+    file_path_str = str(file_path)
+
+    # Try ExifTool first (most reliable for 3GP, can update mvhd box)
+    if _update_with_exiftool(file_path, dt):
+        # Verify the update worked by checking MediaCreateDate
+        if _verify_3gp_date(file_path, dt):
+            return
+        # If verification failed, try the direct mvhd update
+        if _update_mvhd_directly(file_path, dt):
+            return
+
+    # Fallback to ffmpeg
+    if _update_with_ffmpeg(file_path, dt):
+        if _verify_3gp_date(file_path, dt):
+            return
+
+    # Last resort: try mutagen (may not work for all 3GP files)
+    try:
+        from mutagen.mp4 import MP4
+        iso_date = dt.strftime("%Y-%m-%dT%H:%M:%S")
+        mp4_file = MP4(file_path_str)
+        mp4_file['\xa9day'] = [iso_date]
+        mp4_file['\xa9mod'] = [iso_date]
+        mp4_file.save()
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to update 3GP file date. Tried ExifTool, ffmpeg, and mutagen. "
+            f"Last error: {e}. "
+            f"Please install ExifTool (https://exiftool.org/) or ffmpeg for better 3GP support."
+        )
+
+
+def _update_with_exiftool(file_path: Path, dt: datetime) -> bool:
+    """Updates 3GP file date using ExifTool. Returns True if successful."""
+    import subprocess
+
+    # Format dates for ExifTool
+    # ExifTool expects: YYYY:MM:DD HH:MM:SS
+    exif_date = dt.strftime("%Y:%m:%d %H:%M:%S")
+
+    try:
+        # Update multiple date fields that 3GP files may have
+        # Key fields for Media Created in Windows:
+        # - CreateDate: General creation date
+        # - MediaCreateDate: Media creation date (from mvhd box) - THIS IS CRITICAL
+        # - TrackCreateDate: Track creation date (from tkhd boxes)
+        # - QuickTime:CreateDate: QuickTime-specific creation date
+        # - QuickTime:ModifyDate: QuickTime-specific modification date
+        # Using -api QuickTimeUTC=1 to ensure proper epoch handling
+        result = subprocess.run(
+            [
+                'exiftool',
+                '-api', 'QuickTimeUTC=1',  # Use QuickTime epoch (1904) for proper conversion
+                '-overwrite_original',
+                f'-CreateDate={exif_date}',
+                f'-ModifyDate={exif_date}',
+                f'-MediaCreateDate={exif_date}',
+                f'-MediaModifyDate={exif_date}',
+                f'-TrackCreateDate={exif_date}',
+                f'-TrackModifyDate={exif_date}',
+                f'-QuickTime:CreateDate={exif_date}',
+                f'-QuickTime:ModifyDate={exif_date}',
+                f'-Keys:CreateDate={exif_date}',
+                f'-Keys:ModifyDate={exif_date}',
+                str(file_path)
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _update_mvhd_directly(file_path: Path, dt: datetime) -> bool:
+    """Directly updates the mvhd box creation_time using ExifTool. Returns True if successful."""
+    import subprocess
+
+    # Format date for ExifTool
+    exif_date = dt.strftime("%Y:%m:%d %H:%M:%S")
+
+    try:
+        # Try using ExifTool's ability to write to specific atoms
+        # The MediaCreateDate tag should update the mvhd box, but we'll be more explicit
+        # Using -api QuickTimeUTC=1 ensures proper epoch conversion
+        result = subprocess.run(
+            [
+                'exiftool',
+                '-api', 'QuickTimeUTC=1',
+                '-overwrite_original',
+                # Force update the mvhd box by updating MediaCreateDate with explicit format
+                f'-MediaCreateDate<CreateDate',
+                f'-CreateDate={exif_date}',
+                # Also try updating via QuickTime tags
+                f'-QuickTime:CreateDate={exif_date}',
+                str(file_path)
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        # Now explicitly set MediaCreateDate after CreateDate is set
+        subprocess.run(
+            [
+                'exiftool',
+                '-api', 'QuickTimeUTC=1',
+                '-overwrite_original',
+                f'-MediaCreateDate={exif_date}',
+                str(file_path)
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _verify_3gp_date(file_path: Path, expected_dt: datetime) -> bool:
+    """Verifies that the MediaCreateDate was updated correctly. Returns True if match."""
+    import subprocess
+
+    try:
+        # Read the MediaCreateDate from the file
+        result = subprocess.run(
+            [
+                'exiftool',
+                '-MediaCreateDate',
+                '-s', '-s', '-s',  # Suppress all output except the value
+                str(file_path)
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        # Parse the date from ExifTool output
+        date_str = result.stdout.strip()
+        if not date_str:
+            return False
+
+        # ExifTool returns dates in format: YYYY:MM:DD HH:MM:SS
+        try:
+            parsed_date = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+            # Allow 1 second tolerance for rounding
+            time_diff = abs((parsed_date - expected_dt).total_seconds())
+            return time_diff <= 1
+        except ValueError:
+            return False
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _update_with_ffmpeg(file_path: Path, dt: datetime) -> bool:
+    """Updates 3GP file date using ffmpeg. Returns True if successful."""
+    import subprocess
+    import tempfile
+
+    # Format for ffmpeg metadata (ISO 8601 with timezone)
+    iso_date = dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        # Create a temporary output file
+        temp_file = file_path.with_suffix('.tmp' + file_path.suffix)
+
+        # Use ffmpeg to copy the file and update metadata
+        # The key is to use -movflags use_metadata_tags to ensure metadata is written
+        # and -map_metadata 0 to copy existing metadata first
+        subprocess.run(
+            [
+                'ffmpeg',
+                '-i', str(file_path),
+                '-c', 'copy',
+                '-map_metadata', '0',  # Copy all metadata from input
+                '-metadata', f'creation_time={iso_date}',
+                '-metadata', f'date={iso_date}',
+                '-movflags', 'use_metadata_tags',  # Force writing metadata to mvhd box
+                '-y',  # Overwrite output file
+                str(temp_file)
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        # Replace original with updated file
+        temp_file.replace(file_path)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Clean up temp file if it exists
+        temp_file = file_path.with_suffix('.tmp' + file_path.suffix)
+        if temp_file.exists():
+            temp_file.unlink()
+        return False
+
+
 def find_takeout_zip_files(directory: Path) -> List[Path]:
     """
     Find all zip files matching the pattern: takeout-ddddddddTddddddZ-3-ddd.zip
@@ -771,19 +1042,18 @@ def find_takeout_zip_files(directory: Path) -> List[Path]:
     return matching_files
 
 
-def process_takeout_zips(directory: Path, output_dir: Optional[Path] = None) -> Path | None:
+def process_takeout_zips(takeout_directory: Path, output_dir: Optional[Path] = None) -> Path | None:
     """
     Find all takeout zip files in the directory and extract each one to an output folder.
 
-    :param directory: Directory containing the takeout zip files
+    :param takeout_directory: Directory containing the takeout zip files
     :param output_dir: Optional output directory. If None, extracts to the same directory as zip files.
     :return: List of extraction root directories created
     """
-    zip_files = find_takeout_zip_files(directory)
-    extraction_roots = []
+    zip_files = find_takeout_zip_files(takeout_directory)
 
     if not zip_files:
-        logging.error("No matching takeout zip files found in %s", directory)
+        logging.error("No matching takeout zip files found in %s", takeout_directory)
         return None
 
     logging.info("Found %d takeout zip file(s) to process", len(zip_files))
@@ -812,21 +1082,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Get zip file name and create log file path
 
     zip_path: Path = args.zip_path
-    # log_file = zip_path.parent / f"{zip_path.stem}.log"
-    log_file = handle_none_existing_file(zip_path,".log", args.output_dir)
+
+    log_file = handle_none_existing_file(zip_path,".log", args.output_dir, args.report_name)
 
     # Configure logging with log file
     configure_logging(args.verbose, log_file)
     print(f"Logging to file: {log_file}")
-
-
-    # Make sure the zip path that was sent exists and is a file (Not a folder)
-    # if not zip_path.exists():
-    #     logging.error("ZIP not found: %s", zip_path)
-    #     return 2
-    # if not zip_path.is_file():
-    #     logging.error("Not a file: %s", zip_path)
-    #     return 2
 
     try:
         # Creates the output folder based on the zip file name
@@ -836,23 +1097,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         logging.error("Failed to create extraction directory: %s", exc)
         return 2
 
-    # try:
-    #     # Extracts the zip file into the new output folder
-    #     safe_extract_zip(zip_path, extraction_root)
-    # except Exception as exc:
-    #     logging.error("Extraction failed: %s", exc)
-    #     return 2
-
     if extraction_root is None:
-        return 2
+        if args.ignore_zip is not None:
+            extraction_root = args.ignore_zip
+        else:
+            return 2
 
-    results = scan_and_update(extraction_root, dry_run=args.dry_run, case_insensitive=args.case_insensitive)
+    results = scan_and_update(extraction_root, args.output_dir, args.report_name, dry_run=args.dry_run, case_insensitive=args.case_insensitive)
 
-    # # Write results to CSV
-    csv_file = handle_none_existing_file(zip_path,".csv", args.output_dir)
-    # csv_file = zip_path.parent / f"{zip_path.stem}_results.csv"
-    write_results_to_csv(results, csv_file)
-    logging.info("Results written to CSV: %s", csv_file)
     updated = sum(1 for r in results if r.updated)
     would_update = sum(1 for r in results if (not r.updated and r.reason == 'dry-run'))
     missing_ts = sum(1 for r in results if r.reason == 'no-timestamp')
